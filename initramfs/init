@@ -1,0 +1,19 @@
+#!/bin/sh
+echo "Welcome to MinOS!"
+
+mkdir -p /dev/pts
+mount proc /proc -t proc
+mount devpts /dev/pts -t devpts
+mount devtmpfs /dev -t devtmpfs
+hostname minos
+
+mkdir -p /sys/firmware/efi/efivars
+mount efivarfs -t efivarfs /sys/firmware/efi/efivars
+if [ "$?" = "1" ]
+then
+	echo "\e[31mcould not mount efivarfs (did MinOS boot from EFI?)\e[0m"
+else
+	echo "\e[32mEFI vars present\e[0m"
+fi
+
+/bin/bash -i

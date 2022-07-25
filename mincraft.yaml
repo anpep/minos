@@ -1,0 +1,28 @@
+base: https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04-base-arm64.tar.gz
+debs:
+  # kernel and modules
+  - https://kernel.ubuntu.com/~kernel-ppa/mainline/v5.18/arm64/linux-image-unsigned-5.18.0-051800-generic_5.18.0-051800.202205222030_arm64.deb
+  - https://kernel.ubuntu.com/~kernel-ppa/mainline/v5.18/arm64/linux-modules-5.18.0-051800-generic_5.18.0-051800.202205222030_arm64.deb
+
+  # efibootmgr and dependencies
+  - http://ports.ubuntu.com/pool/main/e/efibootmgr/efibootmgr_17-1ubuntu2_arm64.deb
+  - http://ports.ubuntu.com/pool/main/e/efivar/libefiboot1_37-6ubuntu2_arm64.deb
+  - http://ports.ubuntu.com/pool/main/e/efivar/libefivar1_37-6ubuntu2_arm64.deb
+  - http://ports.ubuntu.com/pool/main/p/popt/libpopt0_1.18-3build1_arm64.deb
+
+  # sbsigntool and dependencies
+  - http://ports.ubuntu.com/pool/main/s/sbsigntool/sbsigntool_0.9.4-2ubuntu2_arm64.deb
+  - http://ports.ubuntu.com/pool/main/o/openssl/libssl3_3.0.2-0ubuntu1_arm64.deb
+  - http://ports.ubuntu.com/pool/main/u/util-linux/libuuid1_2.37.2-4ubuntu3_arm64.deb
+
+  # GRUB ARM64 signed EFI binaries
+  - http://ports.ubuntu.com/pool/main/g/grub2-signed/grub-efi-arm64-signed_1.180+2.06-2ubuntu7_arm64.deb
+
+boot:
+  mechanism: grub
+  kernel: /boot/vmlinuz-5.18.0-051800-generic
+  cmdline: apparmor=0
+
+kernel: /boot/vmlinuz-5.18.0-051800-generic
+overlays:
+  - initramfs/
