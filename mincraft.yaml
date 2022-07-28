@@ -1,3 +1,4 @@
+arch: arm64
 base: https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04-base-arm64.tar.gz
 debs:
   # kernel and modules
@@ -17,12 +18,12 @@ debs:
 
   # GRUB ARM64 signed EFI binaries
   - http://ports.ubuntu.com/pool/main/g/grub2-signed/grub-efi-arm64-signed_1.180+2.06-2ubuntu7_arm64.deb
+  - http://ports.ubuntu.com/pool/main/s/systemd/systemd_249.11-0ubuntu3_arm64.deb
 
 boot:
-  mechanism: grub
+  mechanism: grub 
   kernel: /boot/vmlinuz-5.18.0-051800-generic
   cmdline: apparmor=0
 
-kernel: /boot/vmlinuz-5.18.0-051800-generic
 overlays:
   - initramfs/

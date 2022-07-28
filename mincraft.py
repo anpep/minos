@@ -2,6 +2,8 @@
 # coding: utf8
 
 import filecmp
+from glob import glob
+from io import SEEK_SET, FileIO
 import tempfile
 import textwrap
 import yaml
@@ -15,13 +17,16 @@ import requests
 from debian.debfile import DebFile
 from tqdm.auto import tqdm
 from urllib.parse import urlparse
-from typing import Optional, List
+from typing import Optional, List, Union
 
 
 ROOTFS_DIR = os.path.join(os.path.abspath(os.getcwd()), ".cache", "rootfs")
 PKG_DIR = os.path.join(os.path.abspath(os.getcwd()), ".cache", "packages")
 ESP_DIR = os.path.join(os.path.abspath(os.getcwd()), ".cache", "esp")
 INITRD_FILENAME = os.path.join(os.path.abspath(os.getcwd()), ".cache", "initrd.gz")
+ESP_FILENAME = os.path.join(os.path.abspath(os.getcwd()), ".cache", "esp.img")
+
+EFI_ARCH_SUFFIXES = {"amd64": "x64", "arm64": "aa64", "aarch64": "aa64"}
 
 
 def parse_config(filename: str) -> dict:
@@ -65,7 +70,7 @@ def extract_rootfs(filename: str) -> bool:
         members = tgz.getmembers()
 
         for member in tqdm(members, desc=f"extracting base"):
-            tgz.extract(member, ROOTFS_DIR, numeric_owner=True)
+            tgz.extract(member, ROOTFS_DIR)
 
         os.close(os.open(extract_indicator, os.O_CREAT))
 
@@ -97,7 +102,7 @@ def copy_overlay(overlay: str) -> bool:
     os.makedirs(ROOTFS_DIR, exist_ok=True)
 
     dcmp = filecmp.dircmp(overlay, ROOTFS_DIR)
-    if dcmp.diff_files or (dcmp.left_list != dcmp.common_files):
+    if dcmp.diff_files:
         print(f"copying overlay {overlay}")
         shutil.copytree(overlay, ROOTFS_DIR, dirs_exist_ok=True)
         return True
@@ -115,7 +120,7 @@ def pack_initramfs():
             f"find . | (cpio -o --format newc --owner 0:0 2>/dev/null) | gzip | pv -N 'packing initramfs' > {INITRD_FILENAME}",
         ],
         check=True,
-        cwd=ROOTFS_DIR
+        cwd=ROOTFS_DIR,
     )
     os.unlink(pack_lock)
 
@@ -126,58 +131,66 @@ def is_initramfs_pack_incomplete() -> bool:
 
 
 def is_esp_created() -> bool:
-    return os.path.isdir(ESP_DIR)
+    return os.path.isdir(ESP_DIR) and os.path.isfile(ESP_FILENAME)
 
 
 def require_packages(*packages: List[str]):
     missing_packages = set()
     for package in set(packages):
-        package_indicator_filename = os.path.join(ROOTFS_DIR, ".installed_pkgs", package)
+        package_indicator_filename = os.path.join(
+            ROOTFS_DIR, ".installed_pkgs", package
+        )
         if not os.path.isfile(package_indicator_filename):
             missing_packages.add(package)
 
     if missing_packages:
-        print(f"error: package(s) {', '.join(missing_packages)} required but not installed on target OS")
+        print(
+            f"error: package(s) {', '.join(missing_packages)} required but not installed on target OS"
+        )
         sys.exit(1)
 
 
-def build_esp_systemd_stub(kernel_filename: str, cmdline: str = ""):
-    require_packages('systemd')
+def open_kernel(kernel_src_filename) -> Union[gzip.GzipFile, FileIO]:
+    try:
+        print(f"decompressing kernel {os.path.basename(kernel_src_filename)}")
+        f = gzip.open(kernel_src_filename, "rb")
+        f.read(1)
+        f.seek(0, SEEK_SET)
+        return f
+    except gzip.BadGzipFile:
+        print(f"copying uncompressed kernel {os.path.basename(kernel_src_filename)}")
+        return open(kernel_src_filename, "rb")
+
+
+def build_esp_systemd_stub(arch: str, kernel_filename: str, cmdline: str = ""):
+    require_packages("systemd")
+
+    if arch not in EFI_ARCH_SUFFIXES:
+        print(f"unsupported architecture: {arch}", file=sys.stderr)
+        sys.exit(1)
+
+    efi_arch_suffix = EFI_ARCH_SUFFIXES[arch]
 
     osrel_filename = os.path.join(ROOTFS_DIR, "etc/os-release")
     linux_stub_filename = os.path.join(
-        ROOTFS_DIR, "lib/systemd/boot/efi/linuxaa64.efi.stub"
+        ROOTFS_DIR, f"lib/systemd/boot/efi/linux{efi_arch_suffix}.efi.stub"
     )
     kernel_src_filename = os.path.join(ROOTFS_DIR, "./" + kernel_filename)
-    kernel_dst_filename = os.path.join(ESP_DIR, "efi", "boot", "bootaa64.efi")
+    kernel_dst_filename = os.path.join(ESP_DIR, "efi", "boot", f"dont_boot{efi_arch_suffix}.efi")
 
-    print(f"decompressing kernel {os.path.basename(kernel_filename)}")
     os.makedirs(os.path.dirname(kernel_dst_filename), exist_ok=True)
 
-    with gzip.open(kernel_src_filename, "rb") as f_in:
+    with open_kernel(kernel_src_filename) as f_in:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".efi.stub") as f_out:
             # decompress kernel
             shutil.copyfileobj(f_in, f_out)
             f_out.flush()
+            shutil.copyfile(f_out.name, os.path.join(ESP_DIR, "efi", "boot", "vmlinux"))
 
             # write cmdline
             with tempfile.NamedTemporaryFile(delete=False) as cmdline_file:
                 cmdline_file.write(cmdline.encode("utf-8"))
                 cmdline_file.flush()
-                print("dumping virt DTB")
-                subprocess.run(
-                    [
-                        "qemu-system-aarch64",
-                        "-M",
-                        "virt,dumpdtb=.cache/virt.dtb,secure=on,virtualization=on",
-                        "-cpu",
-                        "cortex-a72",
-                        "-nographic",
-                        "-m",
-                        "2G",
-                    ]
-                )
-
                 print("embedding boot configuration into EFI image")
                 subprocess.run(
                     [
@@ -190,10 +203,6 @@ def build_esp_systemd_stub(kernel_filename: str, cmdline: str = ""):
                         f".cmdline={cmdline_file.name}",
                         "--change-section-vma",
                         ".cmdline=0x30000",
-                        "--add-section",
-                        f".dtb=.cache/virt.dtb",
-                        "--change-section-vma",
-                        ".dtb=0x40000",
                         "--add-section",
                         f".linux={f_out.name}",
                         "--change-section-vma",
@@ -209,14 +218,16 @@ def build_esp_systemd_stub(kernel_filename: str, cmdline: str = ""):
                     stderr=sys.stderr.fileno(),
                 )
 
+    pack_esp()
 
-def build_esp_grub(kernel_filename: str, cmdline: str = ""):
-    require_packages('grub-efi-arm64-signed')
+
+def build_esp_grub(arch: str, kernel_filename: str, cmdline: str = ""):
+    require_packages("grub-efi-arm64-signed")
 
     file_list = {
         "usr/lib/grub/arm64-efi-signed/grubaa64.efi.signed": "efi/boot/bootaa64.efi",
         "./" + kernel_filename: "efi/ubuntu/vmlinuz",
-        INITRD_FILENAME: "efi/ubuntu/initrd.gz"
+        INITRD_FILENAME: "efi/ubuntu/initrd.gz",
     }
 
     for src_filename in tqdm(file_list.keys(), desc="building ESP"):
@@ -225,18 +236,51 @@ def build_esp_grub(kernel_filename: str, cmdline: str = ""):
 
         src_filename = os.path.join(ROOTFS_DIR, src_filename)
 
-        if not os.path.isfile(dst_filename) or not filecmp.cmp(src_filename, dst_filename):
+        if not os.path.isfile(dst_filename) or not filecmp.cmp(
+            src_filename, dst_filename
+        ):
             os.makedirs(dst_directory, exist_ok=True)
             shutil.copyfile(src_filename, dst_filename)
 
     with open(os.path.join(ESP_DIR, "efi/ubuntu/grub.cfg"), "w") as f:
-        f.write(textwrap.dedent(f"""
+        f.write(
+            textwrap.dedent(
+                f"""
         # autogenerated by mincraft -- please do not modify directly
         menuentry "MinOS" {{
             linux /efi/ubuntu/vmlinuz {cmdline}
             initrd /efi/ubuntu/initrd.gz
         }}
-        """))
+        """
+            )
+        )
+
+    pack_esp()
+
+
+def pack_esp():
+    print("packing ESP")
+    with open(ESP_FILENAME, "wb") as f:
+        f.truncate(384 * 1024 * 1024)
+        f.flush()
+
+    subprocess.run(["mkfs.vfat", ESP_FILENAME], check=True, stdout=subprocess.DEVNULL)
+
+    for abs_path in glob(os.path.join(ESP_DIR, "**/*"), recursive=True):
+        rel_path = os.path.relpath(abs_path, ESP_DIR)
+
+        if os.path.isdir(abs_path):
+            subprocess.run(
+                ["mmd", "-i", ESP_FILENAME, "::" + rel_path],
+                stdout=subprocess.DEVNULL,
+                check=True,
+            )
+        else:
+            subprocess.run(
+                ["mcopy", "-i", ESP_FILENAME, abs_path, "::" + rel_path],
+                stdout=subprocess.DEVNULL,
+                check=True,
+            )
 
 
 def main():
@@ -252,19 +296,26 @@ def main():
     for filename in deb_filenames:
         has_changes |= install_package(filename)
 
-    for overlay in config["overlays"]:
-        has_changes |= copy_overlay(overlay)
+    if "overlays" in config:
+        for overlay in config["overlays"]:
+            has_changes |= copy_overlay(overlay)
 
     if has_changes or is_initramfs_pack_incomplete():
         pack_initramfs()
 
-    boot_mechanism = config["boot"]["mechanism"]
     if not is_esp_created():
+        arch = config["arch"]
+        boot_mechanism = config["boot"]["mechanism"]
         kernel, cmdline = config["boot"]["kernel"], config["boot"]["cmdline"]
         if boot_mechanism == "grub":
-            build_esp_grub(kernel, cmdline)
+            build_esp_grub(arch, kernel, cmdline)
         elif boot_mechanism == "systemd-stub":
-            build_esp_systemd_stub(kernel, cmdline)
+            build_esp_systemd_stub(arch, kernel, cmdline)
+        else:
+            print(
+                f"error: unsupported boot mechanism `{boot_mechanism}'", file=sys.stderr
+            )
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

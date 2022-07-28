@@ -1,6 +1,15 @@
 # minos
 > A poor man's Linux AArch64 prototyping environment
 
+## Requirements
+### Python
+Use `pip3 install -r requirements.txt` to install Python dependencies.
+
+### System
+- `pv`
+- `mtools` (`mcopy` et al.), `dosfstools` (`mkfs.vfat`), `gdisk` for manipulating the FAT ESP
+- `binutils-multiarch` if using systemd-stub boot mechanism on a cross-architecture scenario
+
 ## Getting started
 Rename `.env.example` to `.env` and fill in the variables inside for QEMU to work. You can edit `mincraft.yaml` for changing the selection of packages and other properties of the target OS.
 

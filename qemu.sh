@@ -10,11 +10,19 @@ then
 fi
 
 qemu-system-aarch64 \
+	-vga cirrus \
 	-bios "$FIRMWARE_IMAGE" \
-	-nographic \
 	-machine virt,highmem=off \
 	-accel "$ACCELERATION_ENGINE" \
 	-cpu cortex-a72 \
 	-m 2G \
-	-drive format=raw,file=fat:rw:"$ESP_PATH",media=disk \
-	-drive if=pflash,format=raw,unit=1,file="$LOCAL_EFIVARS"
+	-drive file=.cache/esp.img,format=raw,if=virtio
+	
+
+#	-drive if=pflash,format=raw,unit=1,file="$LOCAL_EFIVARS" \
+	
+#-device scsi-hd,drive=esp \
+#-drive format=raw,file=.cache/esp.img,media=disk,if=none,id=esp \
+#-drive format=raw,file=fat:rw:"$ESP_PATH",media=disk \
+#
+
