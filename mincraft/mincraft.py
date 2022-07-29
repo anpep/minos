@@ -14,17 +14,18 @@ import tarfile
 import gzip
 import subprocess
 import requests
+from debian.arfile import ArError
 from debian.debfile import DebFile
 from tqdm.auto import tqdm
 from urllib.parse import urlparse
 from typing import Optional, List, Union
 
-
-ROOTFS_DIR = os.path.join(os.path.abspath(os.getcwd()), ".cache", "rootfs")
-PKG_DIR = os.path.join(os.path.abspath(os.getcwd()), ".cache", "packages")
-ESP_DIR = os.path.join(os.path.abspath(os.getcwd()), ".cache", "esp")
-INITRD_FILENAME = os.path.join(os.path.abspath(os.getcwd()), ".cache", "initrd.gz")
-ESP_FILENAME = os.path.join(os.path.abspath(os.getcwd()), ".cache", "esp.img")
+CACHE_DIR = os.path.join(os.path.abspath(os.getcwd()), ".cache")
+ROOTFS_DIR = os.path.join(CACHE_DIR, "rootfs")
+PKG_DIR = os.path.join(CACHE_DIR, "packages")
+ESP_DIR = os.path.join(CACHE_DIR, "esp")
+INITRD_FILENAME = os.path.join(CACHE_DIR, "initrd.gz")
+ESP_FILENAME = os.path.join(CACHE_DIR, "esp.img")
 
 EFI_ARCH_SUFFIXES = {"amd64": "x64", "arm64": "aa64", "aarch64": "aa64"}
 
@@ -81,7 +82,12 @@ def install_package(filename: str) -> bool:
     os.makedirs(ROOTFS_DIR, exist_ok=True)
     os.makedirs(os.path.join(ROOTFS_DIR, ".installed_pkgs"), exist_ok=True)
 
-    deb_file = DebFile(filename)
+    try:
+        deb_file = DebFile(filename)
+    except ArError:
+        print(f"error: {filename} is not a valid Debian package", file=sys.stderr)
+        sys.exit(1)
+
     package = deb_file.debcontrol()["Package"]
     install_indicator = os.path.join(ROOTFS_DIR, ".installed_pkgs", package)
 
@@ -102,6 +108,7 @@ def copy_overlay(overlay: str) -> bool:
     os.makedirs(ROOTFS_DIR, exist_ok=True)
 
     dcmp = filecmp.dircmp(overlay, ROOTFS_DIR)
+    print(dcmp.diff_files)
     if dcmp.diff_files:
         print(f"copying overlay {overlay}")
         shutil.copytree(overlay, ROOTFS_DIR, dirs_exist_ok=True)
@@ -162,6 +169,18 @@ def open_kernel(kernel_src_filename) -> Union[gzip.GzipFile, FileIO]:
         return open(kernel_src_filename, "rb")
 
 
+def open_initrd(initrd_src_filename) -> Union[gzip.GzipFile, FileIO]:
+    try:
+        print(f"decompressing initramfs")
+        f = gzip.open(initrd_src_filename, "rb")
+        f.read(1)
+        f.seek(0, SEEK_SET)
+        return f
+    except gzip.BadGzipFile:
+        print(f"copying uncompressed initramfs")
+        return open(initrd_src_filename, "rb")
+
+
 def build_esp_systemd_stub(arch: str, kernel_filename: str, cmdline: str = ""):
     require_packages("systemd")
 
@@ -176,47 +195,64 @@ def build_esp_systemd_stub(arch: str, kernel_filename: str, cmdline: str = ""):
         ROOTFS_DIR, f"lib/systemd/boot/efi/linux{efi_arch_suffix}.efi.stub"
     )
     kernel_src_filename = os.path.join(ROOTFS_DIR, "./" + kernel_filename)
-    kernel_dst_filename = os.path.join(ESP_DIR, "efi", "boot", f"dont_boot{efi_arch_suffix}.efi")
+    kernel_dst_filename = os.path.join(
+        ESP_DIR, "efi", "boot", f"_noboot{efi_arch_suffix}.efi"
+    )
 
     os.makedirs(os.path.dirname(kernel_dst_filename), exist_ok=True)
 
-    with open_kernel(kernel_src_filename) as f_in:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".efi.stub") as f_out:
+    with open_kernel(kernel_src_filename) as kernel_in:
+        with tempfile.NamedTemporaryFile(delete=False) as kernel_out:
             # decompress kernel
-            shutil.copyfileobj(f_in, f_out)
-            f_out.flush()
-            shutil.copyfile(f_out.name, os.path.join(ESP_DIR, "efi", "boot", "vmlinux"))
+            shutil.copyfileobj(kernel_in, kernel_out)
+            kernel_out.flush()
+            shutil.copyfile(
+                kernel_out.name, os.path.join(ESP_DIR, "efi", "boot", "vmlinux")
+            )
 
-            # write cmdline
-            with tempfile.NamedTemporaryFile(delete=False) as cmdline_file:
-                cmdline_file.write(cmdline.encode("utf-8"))
-                cmdline_file.flush()
-                print("embedding boot configuration into EFI image")
-                subprocess.run(
-                    [
-                        "objcopy",
-                        "--add-section",
-                        f".osrel={osrel_filename}",
-                        "--change-section-vma",
-                        ".osrel=0x20000",
-                        "--add-section",
-                        f".cmdline={cmdline_file.name}",
-                        "--change-section-vma",
-                        ".cmdline=0x30000",
-                        "--add-section",
-                        f".linux={f_out.name}",
-                        "--change-section-vma",
-                        ".linux=0x2000000",
-                        "--add-section",
-                        f".initrd={INITRD_FILENAME}",
-                        "--change-section-vma",
-                        ".initrd=0x3000000",
-                        linux_stub_filename,
-                        kernel_dst_filename,
-                    ],
-                    check=True,
-                    stderr=sys.stderr.fileno(),
-                )
+            with open_initrd(INITRD_FILENAME) as initrd_in:
+                with tempfile.NamedTemporaryFile(
+                    delete=False, suffix=".cpio"
+                ) as initrd_out:
+                    shutil.copyfileobj(initrd_in, initrd_out)
+                    initrd_out.flush()
+                    shutil.copyfile(
+                        INITRD_FILENAME,
+                        os.path.join(ESP_DIR, "efi", "boot", "initrd.gz"),
+                    )
+                    shutil.copyfile(
+                        initrd_out.name, os.path.join(ESP_DIR, "efi", "boot", "initrd")
+                    )
+
+                    with tempfile.NamedTemporaryFile(delete=False) as cmdline_file:
+                        cmdline_file.write(cmdline.encode("utf-8"))
+                        cmdline_file.flush()
+                        print("embedding boot configuration into EFI image")
+                        subprocess.run(
+                            [
+                                "objcopy",
+                                "--add-section",
+                                f".osrel={osrel_filename}",
+                                "--change-section-vma",
+                                ".osrel=0x20000",
+                                "--add-section",
+                                f".cmdline={cmdline_file.name}",
+                                "--change-section-vma",
+                                ".cmdline=0x30000",
+                                "--add-section",
+                                f".linux={kernel_out.name}",
+                                "--change-section-vma",
+                                ".linux=0x2000000",
+                                "--add-section",
+                                f".initrd={initrd_out.name}",
+                                "--change-section-vma",
+                                ".initrd=0x3000000",
+                                linux_stub_filename,
+                                kernel_dst_filename,
+                            ],
+                            check=True,
+                            stderr=sys.stderr.fileno(),
+                        )
 
     pack_esp()
 
@@ -261,7 +297,7 @@ def build_esp_grub(arch: str, kernel_filename: str, cmdline: str = ""):
 def pack_esp():
     print("packing ESP")
     with open(ESP_FILENAME, "wb") as f:
-        f.truncate(384 * 1024 * 1024)
+        f.truncate(4096 * 1024 * 1024)
         f.flush()
 
     subprocess.run(["mkfs.vfat", ESP_FILENAME], check=True, stdout=subprocess.DEVNULL)
@@ -286,6 +322,24 @@ def pack_esp():
 def main():
     config = parse_config("mincraft.yaml")
     cmd = sys.argv[1] if len(sys.argv) > 1 else None
+
+    if cmd == "clean":
+        shutil.rmtree(CACHE_DIR)
+        return
+    elif cmd == "clean-esp":
+        shutil.rmtree(ESP_DIR)
+        os.unlink(ESP_FILENAME)
+        return
+    elif cmd == "clean-initramfs":
+        shutil.rmtree(ROOTFS_DIR)
+        os.unlink(INITRD_FILENAME)
+        return
+    elif cmd == "clean-packages":
+        shutil.rmtree(PKG_DIR)
+        return
+    elif cmd is not None:
+        print(f"error: unrecognized command `{cmd}'", file=sys.stderr)
+        sys.exit(1)
 
     base_filename = fetch_file(config["base"])
     deb_filenames = [fetch_file(deb_path) for deb_path in config["debs"]]

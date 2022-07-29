@@ -1,0 +1,17 @@
+arch: amd64
+base: https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04-base-amd64.tar.gz
+debs:
+  # kernel and modules
+  - https://kernel.ubuntu.com/~kernel-ppa/mainline/v5.18/amd64/linux-image-unsigned-5.18.0-051800-generic_5.18.0-051800.202205222030_amd64.deb
+  - https://kernel.ubuntu.com/~kernel-ppa/mainline/v5.18/amd64/linux-modules-5.18.0-051800-generic_5.18.0-051800.202205222030_amd64.deb
+
+  # systemd for stub EFI binaries
+  - http://archive.ubuntu.com/ubuntu/pool/main/s/systemd/systemd_249.11-0ubuntu3_amd64.deb
+
+boot:
+  mechanism: systemd-stub 
+  kernel: /boot/vmlinuz-5.18.0-051800-generic
+  cmdline: apparmor=0
+
+overlays:
+  - initramfs/
