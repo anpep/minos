@@ -7,7 +7,7 @@ Use `pip3 install -r requirements.txt` to install Python dependencies.
 
 ### System
 - `pv`
-- `mtools` (`mcopy` et al.), `dosfstools` (`mkfs.vfat`), `gdisk` for manipulating the FAT ESP
+- `mtools` (`mcopy` et al.), `dosfstools` (`mkfs.vfat`), for manipulating the FAT ESP
 - `binutils-multiarch` if using systemd-stub boot mechanism on a cross-architecture scenario
 
 ## Getting started
@@ -24,7 +24,7 @@ Running `./mincraft.py` will execute the following steps:
 Depending on the `boot mechanism` specified in the YAML file (currently only `grub` and `systemd-stub` are supported, and the latter is not functional yet), it will perform the following tasks:
 
 ### For `grub`
-(The `grub-efi-arm64-signed` package must be installed on the initramfs)
+(The `grub-efi-{amd64,arm64}-signed` package must be installed on the initramfs)
 - Copy the signed GRUB EFI binary, the kernel image and the initrd file onto the EFI system partition directory located at `.cache/esp`.
 - Generate a `grub.cfg` file and place it onto the ESP
 

@@ -27,7 +27,12 @@ ESP_DIR = os.path.join(CACHE_DIR, "esp")
 INITRD_FILENAME = os.path.join(CACHE_DIR, "initrd.gz")
 ESP_FILENAME = os.path.join(CACHE_DIR, "esp.img")
 
-EFI_ARCH_SUFFIXES = {"amd64": "x64", "arm64": "aa64", "aarch64": "aa64"}
+EFI_ARCH_SUFFIXES = {
+    "amd64": "x64",
+    "x86_64": "x64",
+    "arm64": "aa64",
+    "aarch64": "aa64"
+}
 
 
 def parse_config(filename: str) -> dict:
@@ -141,22 +146,6 @@ def is_esp_created() -> bool:
     return os.path.isdir(ESP_DIR) and os.path.isfile(ESP_FILENAME)
 
 
-def require_packages(*packages: List[str]):
-    missing_packages = set()
-    for package in set(packages):
-        package_indicator_filename = os.path.join(
-            ROOTFS_DIR, ".installed_pkgs", package
-        )
-        if not os.path.isfile(package_indicator_filename):
-            missing_packages.add(package)
-
-    if missing_packages:
-        print(
-            f"error: package(s) {', '.join(missing_packages)} required but not installed on target OS"
-        )
-        sys.exit(1)
-
-
 def open_kernel(kernel_src_filename) -> Union[gzip.GzipFile, FileIO]:
     try:
         print(f"decompressing kernel {os.path.basename(kernel_src_filename)}")
@@ -182,21 +171,14 @@ def open_initrd(initrd_src_filename) -> Union[gzip.GzipFile, FileIO]:
 
 
 def build_esp_systemd_stub(arch: str, kernel_filename: str, cmdline: str = ""):
-    require_packages("systemd")
-
-    if arch not in EFI_ARCH_SUFFIXES:
-        print(f"unsupported architecture: {arch}", file=sys.stderr)
-        sys.exit(1)
-
     efi_arch_suffix = EFI_ARCH_SUFFIXES[arch]
-
     osrel_filename = os.path.join(ROOTFS_DIR, "etc/os-release")
     linux_stub_filename = os.path.join(
         ROOTFS_DIR, f"lib/systemd/boot/efi/linux{efi_arch_suffix}.efi.stub"
     )
     kernel_src_filename = os.path.join(ROOTFS_DIR, "./" + kernel_filename)
     kernel_dst_filename = os.path.join(
-        ESP_DIR, "efi", "boot", f"_noboot{efi_arch_suffix}.efi"
+        ESP_DIR, "efi", "boot", f"boot{efi_arch_suffix}.efi"
     )
 
     os.makedirs(os.path.dirname(kernel_dst_filename), exist_ok=True)
@@ -258,10 +240,9 @@ def build_esp_systemd_stub(arch: str, kernel_filename: str, cmdline: str = ""):
 
 
 def build_esp_grub(arch: str, kernel_filename: str, cmdline: str = ""):
-    require_packages("grub-efi-arm64-signed")
-
+    efi_arch_suffix = EFI_ARCH_SUFFIXES[arch]
     file_list = {
-        "usr/lib/grub/arm64-efi-signed/grubaa64.efi.signed": "efi/boot/bootaa64.efi",
+        f"usr/lib/grub/{arch}-efi-signed/grub{efi_arch_suffix}.efi.signed": f"efi/boot/boot{efi_arch_suffix}.efi",
         "./" + kernel_filename: "efi/ubuntu/vmlinuz",
         INITRD_FILENAME: "efi/ubuntu/initrd.gz",
     }

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 LOCAL_EFIVARS=".cache/efivars.fd"
 ESP_PATH=".cache/esp.img"
 
@@ -10,11 +10,11 @@ then
 fi
 
 qemu-system-x86_64 \
-	-vga cirrus \
-	-bios "$FIRMWARE_IMAGE" \
+	-net none \
+	-nographic \
 	-machine q35 \
-	-accel "$ACCELERATION_ENGINE" \
 	-cpu max \
-	-m 2G \
+	-m 1G \
 	-drive file="$ESP_PATH",format=raw \
+	-drive if=pflash,format=raw,readonly=yes,unit=0,file="$FIRMWARE_IMAGE" \
 	-drive if=pflash,format=raw,unit=1,file="$LOCAL_EFIVARS"
