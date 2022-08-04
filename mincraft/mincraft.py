@@ -7,11 +7,15 @@ from io import SEEK_SET, FileIO
 import tempfile
 import textwrap
 import yaml
+import platform
+import contextlib
 import os
 import sys
 import shutil
 import tarfile
+import math
 import gzip
+import shlex
 import subprocess
 import requests
 from debian.arfile import ArError
@@ -275,6 +279,106 @@ def build_esp_grub(arch: str, kernel_filename: str, cmdline: str = ""):
     pack_esp()
 
 
+def build_esp_efibootguard(arch: str, kernel_filename: str, common_cmdline: str, image_config: dict):
+    if arch != "arm64":
+        print(f"unimplemented architecture \"{arch}\" with EFI boot guard", file=sys.stderr)
+        sys.exit(1)
+
+    if not os.path.isfile("efibootguard/efibootguardaa64.efi"):
+        if platform.machine() != "aarch64":
+            print("cross-compiling EFI boot guard is not supported", file=sys.stderr)
+            print("manually cross-compile EFI boot guard for AArch64 and run this command again", file=sys.stderr)
+            sys.exit(1)
+
+        print("configuring EFI boot guard")
+        efibootguard_cwd = os.path.join(os.getcwd(), "efibootguard")
+        subprocess.run(["autoreconf", "-fi"], check=True, cwd=efibootguard_cwd)
+        subprocess.run(["/bin/sh", "-c", "./configure --disable-completion"], check=True, cwd=efibootguard_cwd)
+        print("building EFI boot guard")
+        subprocess.run(["make"], check=True, cwd=efibootguard_cwd)
+
+    print("creating firmware image")
+    with open(ESP_FILENAME, "wb") as f:
+        f.truncate(int(image_config["size"]) * 1024 * 1024)
+        f.flush()
+
+    print("creating partitions")
+    parted_cmdline = ["parted", "--script", ESP_FILENAME, "--"]
+
+    num_slots = len(image_config["slots"])
+    esp_size = 5 # 5% of 1GiB is 50MiB for the ESP
+    free_space = 100.0 - esp_size # free space for every other partition
+    config_partition_size = free_space / num_slots
+
+    # create partition table and bootable ESP
+    parted_cmdline += ["mklabel", "gpt", ""]
+    parted_cmdline += ["mkpart", "fat32", "0%", f"{esp_size}%", ""]
+    parted_cmdline += ["set", "1", "esp", "on", ""]
+
+    # create config partitions
+    for i in range(0, num_slots):
+        partition_start = math.floor(esp_size + i * config_partition_size)
+        partition_end = math.floor(partition_start + config_partition_size)
+        parted_cmdline += ["mkpart", "fat16", f"{partition_start}%", f"{partition_end}%", ""]
+
+    subprocess.run(
+        parted_cmdline,
+        check=True
+    )
+
+    print("mounting loop device... ", end="")
+    loop_dev = subprocess.check_output(["losetup", "-f"]).decode("utf8").strip()
+    print(loop_dev, end="")
+    subprocess.call(["sudo", "-S", "losetup", "-Pf", ESP_FILENAME])
+    print(" OK")
+
+    try:
+        mount_dir = tempfile.mkdtemp()
+
+        print("creating ESP")
+        subprocess.call(["sudo", "-S", "mkfs.fat", f"{loop_dev}p1"])
+        subprocess.call(["sudo", "-S", "mount", f"{loop_dev}p1", mount_dir])
+        try:
+            subprocess.call(["sudo", "-S", "mkdir", "-p", os.path.join(mount_dir, "EFI", "BOOT")])
+            subprocess.call(["sudo", "-S", "cp", os.path.join(os.getcwd(), "efibootguard/efibootguardaa64.efi"), os.path.join(mount_dir, "EFI", "BOOT", "BOOTAA64.EFI")])
+        finally:
+            subprocess.call(["sudo", "-S", "umount", mount_dir])
+
+        for slot_num in range(1, 1 + num_slots):
+            partition_dev = f"{loop_dev}p{1 + slot_num}"
+            slot = image_config["slots"][slot_num - 1]
+            slot_label = slot["label"]
+            slot_timeout = slot["timeout"]
+            slot_cmdline = common_cmdline + " " + slot["cmdline"]
+            slot_cmdline += " initrd=\\initrd.gz"
+
+            print(f"creating partition for slot {slot_num}: {partition_dev}")
+            subprocess.call(["sudo", "-S", "mkfs.fat", "-F", "16", partition_dev])
+            subprocess.call(["sudo", "-S", "mount", partition_dev, mount_dir])
+            try:
+                with tempfile.NamedTemporaryFile(delete=False) as label_out:
+                    label_out.write(slot_label.encode("utf-16-le"))
+                    label_out.flush()
+                    subprocess.call(["sudo", "-S", "cp", label_out.name, os.path.join(mount_dir, "EFILABEL")])
+
+                subprocess.call(["sudo", "-S", "./efibootguard/bg_setenv", "-f", mount_dir, "-r", str(slot_num), f"--kernel=C:{slot_label}:vmlinuz-linux", f"--args=\"{slot_cmdline}\"", f"--watchdog={slot_timeout}"])
+                kernel_src_filename = os.path.join(ROOTFS_DIR, "./" + kernel_filename)
+                with open_kernel(kernel_src_filename) as kernel_in:
+                    with tempfile.NamedTemporaryFile(delete=False) as kernel_out:
+                        # decompress kernel
+                        shutil.copyfileobj(kernel_in, kernel_out)
+                        kernel_out.flush()
+                        print("copying initrd")
+                        subprocess.call(["sudo", "-S", "cp", kernel_out.name, os.path.join(mount_dir, "vmlinuz-linux")])
+                subprocess.call(["sudo", "-S", "cp", INITRD_FILENAME, os.path.join(mount_dir, "initrd.gz")])
+            finally:
+                subprocess.call(["sudo", "-S", "umount", mount_dir])
+    finally:
+        print("detaching loop device... ", end="")
+        subprocess.call(["sudo", "-S", "losetup", "-D", ESP_FILENAME])
+        print("OK")
+    
+
 def pack_esp():
     print("packing ESP")
     with open(ESP_FILENAME, "wb") as f:
@@ -305,18 +409,20 @@ def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else None
 
     if cmd == "clean":
-        shutil.rmtree(CACHE_DIR)
+        shutil.rmtree(CACHE_DIR, ignore_errors=True)
         return
     elif cmd == "clean-esp":
-        shutil.rmtree(ESP_DIR)
-        os.unlink(ESP_FILENAME)
+        shutil.rmtree(ESP_DIR, ignore_errors=True)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(ESP_FILENAME)
         return
     elif cmd == "clean-initramfs":
-        shutil.rmtree(ROOTFS_DIR)
-        os.unlink(INITRD_FILENAME)
+        shutil.rmtree(ROOTFS_DIR, ignore_errors=True)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(INITRD_FILENAME)
         return
     elif cmd == "clean-packages":
-        shutil.rmtree(PKG_DIR)
+        shutil.rmtree(PKG_DIR, ignore_errors=True)
         return
     elif cmd is not None:
         print(f"error: unrecognized command `{cmd}'", file=sys.stderr)
@@ -346,6 +452,8 @@ def main():
             build_esp_grub(arch, kernel, cmdline)
         elif boot_mechanism == "systemd-stub":
             build_esp_systemd_stub(arch, kernel, cmdline)
+        elif boot_mechanism == "efibootguard":
+            build_esp_efibootguard(arch, kernel, cmdline, config["image"])
         else:
             print(
                 f"error: unsupported boot mechanism `{boot_mechanism}'", file=sys.stderr

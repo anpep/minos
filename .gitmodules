@@ -1,0 +1,3 @@
+[submodule "examples/minos-efibootguard-aarch64/efibootguard"]
+	path = examples/minos-efibootguard-aarch64/efibootguard
+	url = https://github.com/siemens/efibootguard
