@@ -7,7 +7,6 @@ debs:
 
   # GRUB EFI binaries
   - http://ports.ubuntu.com/pool/main/g/grub2-signed/grub-efi-arm64-signed_1.180+2.06-2ubuntu7_arm64.deb
-  - http://ports.ubuntu.com/pool/main/s/systemd/systemd_249.11-0ubuntu3_arm64.deb
 
 boot:
   mechanism: grub 
