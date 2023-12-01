@@ -2,8 +2,6 @@
 # coding: utf8
 
 import filecmp
-from glob import glob
-from io import SEEK_SET, FileIO
 import tempfile
 import textwrap
 import yaml
@@ -15,20 +13,23 @@ import shutil
 import tarfile
 import math
 import gzip
-import shlex
 import subprocess
 import requests
+
+from apt_repo import *
 from debian.arfile import ArError
 from debian.debfile import DebFile
 from tqdm.auto import tqdm
 from urllib.parse import urlparse
 from typing import Optional, List, Union
+from glob import glob
+from io import SEEK_SET, FileIO
 
 CACHE_DIR = os.path.join(os.path.abspath(os.getcwd()), ".cache")
 ROOTFS_DIR = os.path.join(CACHE_DIR, "rootfs")
 PKG_DIR = os.path.join(CACHE_DIR, "packages")
 ESP_DIR = os.path.join(CACHE_DIR, "esp")
-INITRD_FILENAME = os.path.join(CACHE_DIR, "initrd.gz")
+INITRD_FILENAME = os.path.join(CACHE_DIR, "initrd.img")
 ESP_FILENAME = os.path.join(CACHE_DIR, "esp.img")
 
 EFI_ARCH_SUFFIXES = {
@@ -38,10 +39,56 @@ EFI_ARCH_SUFFIXES = {
     "aarch64": "aa64"
 }
 
-
 def parse_config(filename: str) -> dict:
     with open(filename) as f:
         return yaml.load(f, Loader=yaml.FullLoader)
+    
+
+def resolve_base(base: str, arch: str) -> str:
+    try:
+        url = urlparse(base)
+        if url.scheme == "":
+            raise Exception()
+        return base
+    except:
+        return f"https://cdimage.ubuntu.com/ubuntu-base/releases/{base}/release/ubuntu-base-{base}-base-{arch}.tar.gz"
+
+def resolve_deb(deb: str, repos: Optional[List[APTRepository]] = None, arch: Optional[str] = None) -> str:
+    try:
+        url = urlparse(deb)
+        if url.scheme == "":
+            raise Exception()
+        return deb
+    except:
+        if repos is None:
+            print(
+                f"error: apt configuration required for resolving package `{deb}'", file=sys.stderr
+            )
+            sys.exit(1)
+        
+        print(f"resolving package {deb}:{arch}", end="\033[K\r")
+        packages = []
+        for repo in repos:
+            packages = []
+            if len(repo.components) == 0:
+                packages.extend(repo.get_binary_packages_by_component(None, arch))
+            for component in repo.components:
+                packages.extend(repo.get_binary_packages_by_component(component, arch))
+
+            selected = None
+            for package in packages:
+                if package.package == deb:
+                    selected = package
+                    
+            if selected is None:
+                continue
+                
+            print(f"selected {deb}-{selected.version}", end="\033[K\r")
+            return repo.url + "/" + selected.filename
+        print(
+            f"error: cannot find package `{deb}'", file=sys.stderr
+        )
+        sys.exit(1)
 
 
 def fetch_file(url: str, filename: Optional[str] = None) -> str:
@@ -79,12 +126,19 @@ def extract_rootfs(filename: str) -> bool:
     with tarfile.open(filename, "r:gz") as tgz:
         members = tgz.getmembers()
 
-        for member in tqdm(members, desc=f"extracting base"):
+        for member in tqdm(members, desc="extracting base"):
             tgz.extract(member, ROOTFS_DIR)
 
         os.close(os.open(extract_indicator, os.O_CREAT))
 
     return True
+
+def run_depmod() -> None:
+    with tqdm([], desc="running depmod"):
+        ksymtab = glob(ROOTFS_DIR + "/boot/System.map*")[0]
+        modules_path = glob(ROOTFS_DIR + "/lib/modules/*")[0]
+        force_version = os.path.basename(modules_path)
+        subprocess.run(["depmod", "-F", ksymtab, "-b", ROOTFS_DIR, force_version])
 
 
 def install_package(filename: str) -> bool:
@@ -116,15 +170,12 @@ def install_package(filename: str) -> bool:
 def copy_overlay(overlay: str) -> bool:
     os.makedirs(ROOTFS_DIR, exist_ok=True)
 
-    dcmp = filecmp.dircmp(overlay, ROOTFS_DIR)
-    print(dcmp.diff_files)
-    if dcmp.diff_files:
-        print(f"copying overlay {overlay}")
-        shutil.copytree(overlay, ROOTFS_DIR, dirs_exist_ok=True)
-        return True
+    overlay = os.path.abspath(overlay)
+    dcmp = filecmp.dircmp(ROOTFS_DIR, overlay)
 
-    return False
-
+    print(f"copying overlay {overlay}")
+    shutil.copytree(overlay, ROOTFS_DIR, dirs_exist_ok=True)
+    return True
 
 def pack_initramfs():
     pack_lock = os.path.join(ROOTFS_DIR, ".installed_pkgs", ".initramfs")
@@ -133,7 +184,7 @@ def pack_initramfs():
         [
             "/bin/sh",
             "-c",
-            f"find . | (cpio -o --format newc --owner 0:0 2>/dev/null) | gzip | pv -N 'packing initramfs' > {INITRD_FILENAME}",
+            f"find . | (cpio -o -H newc --owner 0:0) | pv -N 'packing initramfs' > {INITRD_FILENAME}",
         ],
         check=True,
         cwd=ROOTFS_DIR,
@@ -246,7 +297,7 @@ def build_esp_systemd_stub(arch: str, kernel_filename: str, cmdline: str = ""):
 def build_esp_grub(arch: str, kernel_filename: str, cmdline: str = ""):
     efi_arch_suffix = EFI_ARCH_SUFFIXES[arch]
     file_list = {
-        f"usr/lib/grub/{arch}-efi-signed/grub{efi_arch_suffix}.efi.signed": f"efi/boot/boot{efi_arch_suffix}.efi",
+        f"usr/lib/grub/{arch}-efi/monolithic/grub{efi_arch_suffix}.efi": f"efi/boot/boot{efi_arch_suffix}.efi",
         "./" + kernel_filename: "efi/ubuntu/vmlinuz",
         INITRD_FILENAME: "efi/ubuntu/initrd.gz",
     }
@@ -428,8 +479,21 @@ def main():
         print(f"error: unrecognized command `{cmd}'", file=sys.stderr)
         sys.exit(1)
 
-    base_filename = fetch_file(config["base"])
-    deb_filenames = [fetch_file(deb_path) for deb_path in config["debs"]]
+    arch = config["arch"]
+    base = config["base"]
+
+    if "apt" in config:
+        url = config["apt"]["url"]
+        components = config["apt"]["components"]
+        repos = [
+            APTRepository(url, dist, components)
+            for dist in config["apt"]["dists"]
+        ]
+    else:
+        repos = None
+
+    base_filename = fetch_file(resolve_base(base, arch))
+    deb_filenames = [fetch_file(resolve_deb(deb, repos,  arch)) for deb in config["debs"]]
 
     has_changes = False
     has_changes |= extract_rootfs(base_filename)
@@ -442,10 +506,10 @@ def main():
             has_changes |= copy_overlay(overlay)
 
     if has_changes or is_initramfs_pack_incomplete():
+        run_depmod()
         pack_initramfs()
 
     if not is_esp_created():
-        arch = config["arch"]
         boot_mechanism = config["boot"]["mechanism"]
         kernel, cmdline = config["boot"]["kernel"], config["boot"]["cmdline"]
         if boot_mechanism == "grub":

@@ -1,0 +1,6 @@
+{
+    "name": "hello-world-microwave",
+    "version": "1.0",
+    "summary": "Example microwave firmware based on KernOS",
+    "nonce": "deadc0de"
+}

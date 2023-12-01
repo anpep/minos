@@ -1,17 +1,20 @@
 arch: arm64
-base: https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04-base-arm64.tar.gz
-debs:
-  # kernel and modules
-  - https://kernel.ubuntu.com/~kernel-ppa/mainline/v5.18/arm64/linux-image-unsigned-5.18.0-051800-generic_5.18.0-051800.202205222030_arm64.deb
-  - https://kernel.ubuntu.com/~kernel-ppa/mainline/v5.18/arm64/linux-modules-5.18.0-051800-generic_5.18.0-051800.202205222030_arm64.deb
+base: "23.10"
+apt:
+  url: http://ports.ubuntu.com/ubuntu-ports
+  components: [ main ]
+  dists: [ mantic ]
 
-  # GRUB EFI binaries
-  - http://ports.ubuntu.com/pool/main/g/grub2-signed/grub-efi-arm64-signed_1.180+2.06-2ubuntu7_arm64.deb
+debs:
+  - linux-image-unsigned-6.5.0-9-generic
+  - linux-modules-6.5.0-9-generic
+  - grub-efi-arm64-bin
+  - busybox-static
 
 boot:
   mechanism: grub 
-  kernel: /boot/vmlinuz-5.18.0-051800-generic
-  cmdline: apparmor=0
+  kernel: /boot/vmlinuz-6.5.0-9-generic
+  cmdline: apparmor=0 ip=dhcp
 
 overlays:
   - initramfs/
